@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 # [변경] 환경 변수 로드 및 검증 개선
 time.sleep(1)  # 1초 대기
 openai.api_key = st.secrets["openai"]["API_KEY"]
+api_key = openai.api_key  # Store in a variable for later use
 
 # [변경] 모듈화: PDF 처리 기능을 클래스로 분리
 class PDFProcessor:
