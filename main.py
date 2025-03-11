@@ -15,10 +15,8 @@ import time  # [추가] time 모듈 추가
 from dotenv import load_dotenv
 
 # [변경] 환경 변수 로드 및 검증 개선
-load_dotenv()
-api_key = os.getenv("YOURKEY")
-if not api_key:
-    raise ValueError("API 키가 설정되지 않았습니다. .env 파일을 확인해주세요.")
+time.sleep(1)  # 1초 대기
+openai.api_key = st.secrets["openai"]["API_KEY"]
 
 # [변경] 모듈화: PDF 처리 기능을 클래스로 분리
 class PDFProcessor:
