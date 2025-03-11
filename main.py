@@ -13,6 +13,7 @@ import re
 import csv
 import time  # [추가] time 모듈 추가
 from dotenv import load_dotenv
+import openai
 
 # [변경] 환경 변수 로드 및 검증 개선
 time.sleep(1)  # 1초 대기
