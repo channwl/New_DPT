@@ -7,20 +7,22 @@ from langchain.prompts import PromptTemplate
 from langchain_core.runnables import Runnable
 from langchain.schema.output_parser import StrOutputParser
 from langchain_community.document_loaders import PyMuPDFLoader
-from typing import List, Tuple, Dict, Any, Optional  # [변경] 추가 타입 임포트
+from typing import List, Tuple, Dict, Any, Optional
 import os
 import re
 import csv
-import time  # [추가] time 모듈 추가
+import time
 from dotenv import load_dotenv
 import openai
+import tempfile
+import uuid  # 고유 ID 생성용
 
-# [변경] 환경 변수 로드 및 검증 개선
+# 환경 변수 로드 및 검증 개선
 time.sleep(1)  # 1초 대기
 openai.api_key = st.secrets["openai"]["API_KEY"]
-api_key = openai.api_key  # Store in a variable for later use
+api_key = openai.api_key  # 변수에 저장하여 나중에 사용
 
-# [변경] 모듈화: PDF 처리 기능을 클래스로 분리
+# 모듈화: PDF 처리 기능을 클래스로 분리
 class PDFProcessor:
     @staticmethod
     def pdf_to_documents(pdf_path: str) -> List[Document]:
@@ -31,7 +33,7 @@ class PDFProcessor:
             for d in documents:
                 d.metadata['file_path'] = pdf_path
             return documents
-        except Exception as e:  # [추가] 예외 처리 추가
+        except Exception as e:
             st.error(f"PDF 로드 중 오류 발생: {e}")
             return []
 
@@ -42,36 +44,68 @@ class PDFProcessor:
         return text_splitter.split_documents(documents)
 
     @staticmethod
-    def save_to_vector_store(documents: List[Document]) -> bool:  # [변경] 성공/실패 여부 반환
+    def save_to_vector_store(documents: List[Document], index_name: str = "faiss_index") -> bool:
         """Document를 벡터 DB에 저장"""
         try:
-            # [변경] API 키를 명시적으로 전달
             embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
             vector_store = FAISS.from_documents(documents, embedding=embeddings)
-            vector_store.save_local("faiss_index")
+            vector_store.save_local(index_name)
             return True
-        except Exception as e:  # [추가] 예외 처리 추가
+        except Exception as e:
             st.error(f"벡터 저장소 생성 중 오류 발생: {e}")
             return False
 
     @staticmethod
-    def process_pdf(pdf_path: str) -> bool:  # [추가] PDF 처리를 통합하는 메서드 추가
-        """PDF 파일 처리 작업 통합"""
-        if not os.path.exists(pdf_path):
-            st.error(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
+    def process_uploaded_files(uploaded_files) -> bool:
+        """업로드된 PDF 파일 처리 작업 통합"""
+        if not uploaded_files:
+            st.error("업로드된 파일이 없습니다.")
             return False
+        
+        all_documents = []
+        
+        # 업로드된 모든 파일 처리
+        for uploaded_file in uploaded_files:
+            # 임시 파일로 저장
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                temp_file.write(uploaded_file.getvalue())
+                temp_path = temp_file.name
             
-        documents = PDFProcessor.pdf_to_documents(pdf_path)
-        if not documents:
+            # PDF 문서 추출
+            documents = PDFProcessor.pdf_to_documents(temp_path)
+            if documents:
+                all_documents.extend(documents)
+                st.success(f"{uploaded_file.name} 파일 처리 완료")
+            else:
+                st.warning(f"{uploaded_file.name} 파일 처리 실패")
+            
+            # 임시 파일 삭제
+            os.unlink(temp_path)
+        
+        if not all_documents:
+            st.error("모든 파일 처리에 실패했습니다.")
             return False
-            
-        smaller_documents = PDFProcessor.chunk_documents(documents)
-        return PDFProcessor.save_to_vector_store(smaller_documents)
+        
+        # 문서 분할
+        smaller_documents = PDFProcessor.chunk_documents(all_documents)
+        
+        # 세션에 고유한 인덱스 이름 생성 또는 사용
+        if "index_name" not in st.session_state:
+            st.session_state.index_name = f"faiss_index_{uuid.uuid4().hex[:8]}"
+        
+        # 벡터 저장소에 저장
+        success = PDFProcessor.save_to_vector_store(smaller_documents, st.session_state.index_name)
+        
+        if success:
+            st.success(f"총 {len(all_documents)}개의 문서, {len(smaller_documents)}개의 청크가 처리되었습니다.")
+        
+        return success
 
-# [변경] 모듈화: RAG 시스템 기능을 클래스로 분리
+# 모듈화: RAG 시스템 기능을 클래스로 분리
 class RAGSystem:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, index_name: str = "faiss_index"):
         self.api_key = api_key
+        self.index_name = index_name
         
     def get_rag_chain(self) -> Runnable:
         """RAG 체인 생성"""
@@ -88,27 +122,25 @@ class RAGSystem:
         응답:"""
 
         custom_rag_prompt = PromptTemplate.from_template(template)
-        # [변경] API 키를 명시적으로 전달
         model = ChatOpenAI(model="gpt-4o", openai_api_key=self.api_key)
 
         return custom_rag_prompt | model | StrOutputParser()
     
-    # [변경] 캐싱 데코레이터 수정 (@st.cache_data 제거, @st.cache_resource만 사용)
     @st.cache_resource
-    def get_vector_db(self):
+    def get_vector_db(_self, index_name):  # 첫 번째 인자로 self를 받되 사용하지 않도록 _self로 이름 변경
         """벡터 DB 로드"""
         try:
-            embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=self.api_key)
-            return FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        except Exception as e:  # [추가] 예외 처리 추가
+            embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
+            return FAISS.load_local(index_name, embeddings, allow_dangerous_deserialization=True)
+        except Exception as e:
             st.error(f"벡터 DB 로드 중 오류 발생: {e}")
             return None
     
-    def process_question(self, user_question: str) -> Tuple[str, List[Document]]:  # [변경] 반환 타입 명시
+    def process_question(self, user_question: str) -> Tuple[str, List[Document]]:
         """사용자 질문에 대한 RAG 처리"""
-        vector_db = self.get_vector_db()
-        if not vector_db:  # [추가] DB 로드 실패 시 처리
-            return "시스템 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", []
+        vector_db = self.get_vector_db(self.index_name)
+        if not vector_db:
+            return "시스템 오류가 발생했습니다. PDF 파일을 다시 업로드해주세요.", []
             
         # 관련 문서 검색
         retriever = vector_db.as_retriever(search_kwargs={"k": 3})
@@ -120,40 +152,26 @@ class RAGSystem:
         try:
             response = chain.invoke({"question": user_question, "context": retrieve_docs})
             return response, retrieve_docs
-        except Exception as e:  # [추가] 예외 처리 추가
+        except Exception as e:
             st.error(f"응답 생성 중 오류 발생: {e}")
             return "질문 처리 중 오류가 발생했습니다. 다시 시도해주세요.", []
 
-# [추가] 모듈화: UI 관련 기능을 클래스로 분리
+# 모듈화: UI 관련 기능을 클래스로 분리
 class ChatbotUI:
-    @staticmethod
-    def create_buttons(options):
-        """버튼 생성"""
-        for option in options:
-            if isinstance(option, tuple):
-                label, value = option
-            else:
-                label, value = option, option
-                
-            if st.button(label):
-                st.session_state.selected_category = value
-                return True  # [변경] 버튼 클릭 시 True 반환하도록 수정
-        return False
-                
     @staticmethod
     def natural_sort_key(s):
         """파일명 자연 정렬 키 생성"""
         return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', s)]
     
     @staticmethod
-    def save_feedback(questions: List[Dict], feedbacks: List[Dict]) -> bool:  # [변경] 성공/실패 여부 반환
+    def save_feedback(questions: List[Dict], feedbacks: List[Dict]) -> bool:
         """사용자 질문 및 피드백을 CSV로 저장"""
         if not questions and not feedbacks:
             st.warning("저장할 질문 또는 피드백 데이터가 없습니다.")
             return False
             
         try:
-            # [변경] 질문과 피드백 형식 통일 (딕셔너리/문자열 모두 처리)
+            # 질문과 피드백 형식 통일 (딕셔너리/문자열 모두 처리)
             formatted_questions = []
             for q in questions:
                 if isinstance(q, dict) and "질문" in q:
@@ -181,7 +199,7 @@ class ChatbotUI:
                     writer.writerow([q, f])
             return True
             
-        except Exception as e:  # [추가] 예외 처리 추가
+        except Exception as e:
             st.error(f"피드백 저장 중 오류 발생: {e}")
             return False
 
@@ -192,59 +210,54 @@ def main():
         page_icon="🤖",
         page_title="디지털경영전공 챗봇")
 
-    # [변경] 세션 상태 초기화를 한곳에서 처리
+    # 세션 상태 초기화를 한곳에서 처리
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "selected_category" not in st.session_state:
-        st.session_state.selected_category = None
     if "user_questions" not in st.session_state:
         st.session_state.user_questions = []
     if "user_feedback" not in st.session_state:
         st.session_state.user_feedback = []
-    # [추가] PDF 처리 상태 추적용 변수
+    # PDF 처리 상태 추적용 변수
     if "pdf_processed" not in st.session_state:
         st.session_state.pdf_processed = False
+    # 인덱스 이름 저장용 변수
+    if "index_name" not in st.session_state:
+        st.session_state.index_name = f"faiss_index_{uuid.uuid4().hex[:8]}"
 
     # UI 초기화
     st.header("디지털경영전공 챗봇")
-    st.text("질문하고싶은 카테고리를 선택해주세요")
-
-    # [추가] RAG 시스템 및 UI 클래스 초기화
-    rag_system = RAGSystem(api_key)
-    ui = ChatbotUI()
 
     # 레이아웃
-    left1_column, left2_column, mid_column, right_column = st.columns([0.3, 0.3, 1, 0.9])
+    left_column, mid_column, right_column = st.columns([1, 2, 1])
     
-    # 왼쪽 첫 번째 열 - 카테고리
-    with left1_column:
-        st.text("디지털경영학과")
+    # 왼쪽 열 - PDF 업로드 및 처리
+    with left_column:
+        st.subheader("PDF 업로드")
+        uploaded_files = st.file_uploader(
+            "PDF 파일을 업로드해주세요 (여러 파일 선택 가능)",
+            type=["pdf"],
+            accept_multiple_files=True
+        )
         
-        categories = [
-            "학과 정보", "전공 과목", "교내 장학금", "학교 행사",
-            "소모임", "비교과", "교환 학생"]
-
-        # [변경] 버튼 클릭 결과에 따른 처리 개선
-        if ui.create_buttons(categories) and st.session_state.selected_category:
-            # [추가] 스피너 추가로 사용자에게 처리 중임을 알림
-            with st.spinner(f"{st.session_state.selected_category} 정보를 준비 중입니다..."):
-                pdf_path = f"{st.session_state.selected_category}.pdf"
-                st.session_state.pdf_processed = PDFProcessor.process_pdf(pdf_path)
-
-    # 왼쪽 두 번째 열 - 학년별
-    with left2_column:
-        st.text("학년별")
-
-        grade_levels = [
-            ("20학번 이전", "20이전"), ("21학번", "21"),
-            ("22학번", "22"), ("23학번", "23"), ("24학번", "24")]
-
-        # [변경] 버튼 클릭 결과에 따른 처리 개선
-        if ui.create_buttons(grade_levels) and st.session_state.selected_category:
-            # [추가] 스피너 추가로 사용자에게 처리 중임을 알림
-            with st.spinner(f"{st.session_state.selected_category} 정보를 준비 중입니다..."):
-                pdf_path = f"{st.session_state.selected_category}.pdf"
-                st.session_state.pdf_processed = PDFProcessor.process_pdf(pdf_path)
+        if st.button("업로드한 PDF 처리하기", disabled=not uploaded_files):
+            with st.spinner("PDF 파일 처리 중..."):
+                success = PDFProcessor.process_uploaded_files(uploaded_files)
+                if success:
+                    st.session_state.pdf_processed = True
+                    st.success("모든 PDF 파일 처리가 완료되었습니다!")
+                else:
+                    st.session_state.pdf_processed = False
+                    st.error("PDF 파일 처리 중 오류가 발생했습니다.")
+        
+        # 사용 설명서
+        with st.expander("사용 방법"):
+            st.markdown("""
+            1. 왼쪽에서 PDF 파일을 업로드합니다 (여러 파일 가능).
+            2. '업로드한 PDF 처리하기' 버튼을 클릭합니다.
+            3. 중앙의 입력창에 질문을 입력합니다.
+            4. 챗봇은 업로드한 PDF 파일의 내용을 기반으로 답변합니다.
+            5. 새로운 PDF로 변경하려면 다시 업로드하고 처리하세요.
+            """)
 
     # 중앙 열 - 채팅 인터페이스
     with mid_column:
@@ -254,7 +267,7 @@ def main():
                 st.markdown(message["content"])
         
         # 사용자 메시지 입력 및 처리
-        prompt = st.chat_input("선택하신 카테고리에서 궁금한 점을 질문해 주세요.")
+        prompt = st.chat_input("PDF 내용에 대해 궁금한 점을 질문해 주세요.")
         
         if prompt:
             # 사용자 메시지 표시
@@ -262,32 +275,33 @@ def main():
                 st.markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
             
-            # [추가] 카테고리 선택 여부 확인 로직 추가
-            if not st.session_state.selected_category:
+            # PDF 처리 상태 확인 로직 추가
+            if not st.session_state.pdf_processed:
                 with st.chat_message("assistant"):
-                    assistant_response = "먼저 왼쪽에서 카테고리를 선택해주세요."
-                    st.markdown(assistant_response)
-                    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
-            # [추가] PDF 처리 상태 확인 로직 추가
-            elif not st.session_state.pdf_processed:
-                with st.chat_message("assistant"):
-                    assistant_response = "데이터 처리 중 문제가 발생했습니다. 다시 카테고리를 선택해주세요."
+                    assistant_response = "먼저 왼쪽에서 PDF 파일을 업로드하고 처리해주세요."
                     st.markdown(assistant_response)
                     st.session_state.messages.append({"role": "assistant", "content": assistant_response})
             else:
+                # RAG 시스템 초기화
+                rag_system = RAGSystem(api_key, st.session_state.index_name)
+                
                 # 질문 처리 및 응답
-                # [추가] 스피너 추가로 사용자에게 처리 중임을 알림
                 with st.spinner("질문에 대한 답변을 생성 중입니다..."):
                     try:
                         response, context = rag_system.process_question(prompt)
                         with st.chat_message("assistant"):
                             st.markdown(response)
                             if context:
-                                # [개선] 관련 문서 표시 방식 개선
+                                # 관련 문서 표시 방식 개선
                                 with st.expander("관련 문서 보기"):
                                     for idx, document in enumerate(context, 1):
                                         st.subheader(f"관련 문서 {idx}")
                                         st.write(document.page_content)
+                                        
+                                        # 메타데이터 표시 (파일 정보 등)
+                                        if document.metadata and 'file_path' in document.metadata:
+                                            file_name = os.path.basename(document.metadata['file_path'])
+                                            st.caption(f"출처: {file_name}")
                         
                         st.session_state.messages.append({"role": "assistant", "content": response})
                     except Exception as e:
@@ -295,7 +309,7 @@ def main():
 
     # 오른쪽 열 - 피드백 및 추가 질문
     with right_column:
-        # [변경] 섹션 제목 추가로 UI 명확성 향상
+        # 섹션 제목 추가로 UI 명확성 향상
         st.subheader("추가 질문 및 피드백")
         
         # 추가 질문 섹션
@@ -305,12 +319,12 @@ def main():
             placeholder="과목 변경 or 행사 문의"
         )
 
-        # [변경] 버튼에 key 추가로 중복 방지
+        # 버튼에 key 추가로 중복 방지
         if st.button("질문 제출", key="submit_question"):
             if user_question:
                 st.session_state.user_questions.append({"질문": user_question})
                 st.success("질문이 제출되었습니다.")
-                # [추가] 입력 필드 초기화를 위한 페이지 새로고침
+                # 입력 필드 초기화를 위한 페이지 새로고침
                 st.experimental_rerun()
             else:
                 st.warning("질문을 입력해주세요.")
@@ -328,23 +342,25 @@ def main():
             # 불만족 사유 입력
             reason = st.text_area("불만족한 부분이 무엇인지 말씀해 주세요.")
 
-            # [변경] 버튼에 key 추가로 중복 방지
+            # 버튼에 key 추가로 중복 방지
             if st.button("피드백 제출", key="submit_feedback"):
                 if reason:
                     st.session_state.user_feedback.append({"피드백": reason})
                     st.success("피드백이 제출되었습니다.")
-                    # [추가] 입력 필드 초기화를 위한 페이지 새로고침
+                    # 입력 필드 초기화를 위한 페이지 새로고침
                     st.experimental_rerun()
                 else:
                     st.warning("불만족 사유를 입력해 주세요.")
 
         # 질문 및 피드백 CSV 저장
         st.text("")
+        
+        ui = ChatbotUI()  # UI 클래스 초기화
         if st.button("질문 및 피드백 등록하기"):
-            # [변경] 개선된 피드백 저장 함수 사용
+            # 개선된 피드백 저장 함수 사용
             if ui.save_feedback(st.session_state.user_questions, st.session_state.user_feedback):
                 st.success("질문과 피드백이 등록되었습니다.")
-                # [추가] 등록 후 목록 초기화
+                # 등록 후 목록 초기화
                 st.session_state.user_questions = []
                 st.session_state.user_feedback = []
                 time.sleep(1)
@@ -353,7 +369,7 @@ def main():
         # 문의 정보
         st.text("")
         st.text("")
-        # [변경] 텍스트를 markdown으로 변경하여 가독성 향상
+        # 텍스트를 markdown으로 변경하여 가독성 향상
         st.markdown("""
         고려대학교 세종캠퍼스 디지털경영전공 홈페이지를 참고하거나,
         디지털경영전공 사무실(044-860-1560)에 전화하여 문의사항을 접수하세요.
@@ -362,5 +378,5 @@ def main():
 if __name__ == "__main__":
     main()
 
-# start : streamlit run end.py
+# start : streamlit run app.py
 # stop : ctrl + c
