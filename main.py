@@ -18,13 +18,13 @@ import tempfile
 import uuid  # 고유 ID 생성용
 
 # 환경 변수 로드 및 검증 개선
-time.sleep(1)  # 1초 대기
-openai.api_key = st.secrets["openai"]["API_KEY"]
+time.sleep(1)  # 환경 변수 불러오기 전에 1초 대기
+openai.api_key = st.secrets["openai"]["API_KEY"] #OpenAI API 키를 st.secrets에서 가져와 api_key 변수에 저장
 api_key = openai.api_key  # 변수에 저장하여 나중에 사용
 
-# 모듈화: PDF 처리 기능을 클래스로 분리
+# 모듈화: PDF 처리 기능을 클래스로 분리, PDFProcessor 클래스 (PDF 처리)
 class PDFProcessor:
-    @staticmethod
+    @staticmethod # 클래스에서 객체를 생성하지 않고, 클래스 이름으로 바로 호출할 수 있다.
     def pdf_to_documents(pdf_path: str) -> List[Document]:
         """PDF 파일을 Document 객체 리스트로 변환"""
         try:
@@ -34,7 +34,7 @@ class PDFProcessor:
                 d.metadata['file_path'] = pdf_path
             return documents
         except Exception as e:
-            st.error(f"PDF 로드 중 오류 발생: {e}")
+            st.error(f"PDF 로드 중 오류 발생: {e}") #사용자 친화적 시스템 : Streamlit에서 에러 표시해주기
             return []
 
     @staticmethod
@@ -111,16 +111,19 @@ class RAGSystem:
         """RAG 체인 생성"""
         template = """
         아래 컨텍스트를 바탕으로 질문에 답해주세요:
-        - 질문에 대한 응답은 5줄 이내로 간결하게 작성해주세요.
-        - 애매하거나 모르는 내용은 "잘 모르겠습니다"라고 답변해주세요.
-        - 공손한 표현을 사용해주세요.
-        - '디지털경영전공' 이란 말이 들어가지 않아도, '디지털경영전공' 챗봇이기 때문에 사용자의 답변을 PDF에 찾아서 해주세요
+
+        - 응답은 최대 5문장 이내로 작성해주세요.
+        - 명확한 답변이 어려울 경우 "잘 모르겠습니다"라고 답해주세요.
+        - 공손하고 이해하기 쉬운 표현을 사용해주세요.
+        - '디지털경영전공'이라는 단어가 없더라도, 관련 정보를 PDF에서 찾아 답변해주세요.
 
         컨텍스트: {context}
 
         질문: {question}
 
-        응답:"""
+        응답:
+        """
+
 
         custom_rag_prompt = PromptTemplate.from_template(template)
         model = ChatOpenAI(model="gpt-4o", openai_api_key=self.api_key)
