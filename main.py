@@ -127,7 +127,7 @@ class RAGSystem:
 
 
         custom_rag_prompt = PromptTemplate.from_template(template)
-        model = ChatOpenAI(model="gpt-4o", openai_api_key=self.api_key)
+        model = ChatOpenAI(model="gpt-o1-preview", openai_api_key=self.api_key)
 
         return custom_rag_prompt | model | StrOutputParser()
     
@@ -148,7 +148,7 @@ class RAGSystem:
             return "시스템 오류가 발생했습니다. PDF 파일을 다시 업로드해주세요.", []
             
         # 관련 문서 검색
-        retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+        retriever = vector_db.as_retriever(search_kwargs={"k": 10})
         retrieve_docs = retriever.invoke(user_question)
         
         # RAG 체인 호출
