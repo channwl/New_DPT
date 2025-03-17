@@ -127,7 +127,7 @@ class RAGSystem:
 
 
         custom_rag_prompt = PromptTemplate.from_template(template)
-        model = ChatOpenAI(model="gpt-o1-preview", openai_api_key=self.api_key)
+        model = ChatOpenAI(model="gpt-4o", openai_api_key=self.api_key)
 
         return custom_rag_prompt | model | StrOutputParser()
     
