@@ -8,274 +8,164 @@ from langchain.prompts import PromptTemplate
 from langchain_core.runnables import Runnable
 from langchain.schema.output_parser import StrOutputParser
 from langchain_community.document_loaders import PyMuPDFLoader
-from typing import List, Tuple, Dict, Any, Optional
+from langchain.memory import ConversationSummaryMemory
+from langchain.chains import ConversationChain
+from typing import List, Tuple
 import os
-import re
 import csv
 import time
-from dotenv import load_dotenv
-import tempfile
 import uuid
 
-# Anthropic API 키 로드
-time.sleep(1)  # 환경 변수 불러오기 전에 1초 대기
-anthropic_api_key = st.secrets["anthropic"]["API_KEY"]
+# Anthropic API 키 로드 (Streamlit secrets 사용)
+time.sleep(1)
+api_key = st.secrets["anthropic"]["API_KEY"]
 
-# PDF 처리 기능 클래스
-class PDFProcessor:
-    @staticmethod
-    def pdf_to_documents(pdf_path: str) -> List[Document]:
-        try:
-            loader = PyMuPDFLoader(pdf_path)
-            documents = loader.load()
-            for d in documents:
-                d.metadata['file_path'] = pdf_path
-            return documents
-        except Exception as e:
-            st.error(f"PDF 로드 중 오류 발생: {e}")
-            return []
+# PDF 인덱스 생성 스크립트와 다른 클래스들은 기존 코드 그대로 유지
 
-    @staticmethod
-    def chunk_documents(documents: List[Document]) -> List[Document]:
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-        return text_splitter.split_documents(documents)
-
-    @staticmethod
-    def save_to_vector_store(documents: List[Document], index_name: str = "faiss_index") -> bool:
-        try:
-            embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=st.secrets["openai"]["API_KEY"])
-            vector_store = FAISS.from_documents(documents, embedding=embeddings)
-            vector_store.save_local(index_name)
-            return True
-        except Exception as e:
-            st.error(f"벡터 저장소 생성 중 오류 발생: {e}")
-            return False
-
-    @staticmethod
-    def process_uploaded_files(uploaded_files) -> bool:
-        if not uploaded_files:
-            st.error("업로드된 파일이 없습니다.")
-            return False
-
-        all_documents = []
-
-        for uploaded_file in uploaded_files:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-                temp_file.write(uploaded_file.getvalue())
-                temp_path = temp_file.name
-
-            documents = PDFProcessor.pdf_to_documents(temp_path)
-            if documents:
-                all_documents.extend(documents)
-                st.success(f"{uploaded_file.name} 파일 처리 완료")
-            else:
-                st.warning(f"{uploaded_file.name} 파일 처리 실패")
-
-            os.unlink(temp_path)
-
-        if not all_documents:
-            st.error("모든 파일 처리에 실패했습니다.")
-            return False
-
-        smaller_documents = PDFProcessor.chunk_documents(all_documents)
-
-        if "index_name" not in st.session_state:
-            st.session_state.index_name = f"faiss_index_{uuid.uuid4().hex[:8]}"
-
-        success = PDFProcessor.save_to_vector_store(smaller_documents, st.session_state.index_name)
-
-        if success:
-            st.success(f"총 {len(all_documents)}개의 문서, {len(smaller_documents)}개의 청크가 처리되었습니다.")
-
-        return success
-
-# RAG 시스템
 class RAGSystem:
-    def __init__(self, api_key: str, index_name: str = "faiss_index"):
+    def __init__(self, api_key: str):
         self.api_key = api_key
-        self.index_name = index_name
+        
+        # Claude 3.5 Haiku 모델로 변경
+        self.llm = ChatAnthropic(
+            model="claude-3-5-haiku-20240307", 
+            anthropic_api_key=self.api_key,
+            temperature=0.1,  # 일관된 응답을 위해 낮은 온도 설정
+            max_tokens=1000
+        )
+        
+        # 대화 기억 모듈 초기화
+        self.memory = ConversationSummaryMemory(llm=self.llm)
+        self.conversation_chain = ConversationChain(
+            llm=self.llm, 
+            memory=self.memory, 
+            verbose=True
+        )
 
     def get_rag_chain(self) -> Runnable:
         template = """
-        아래 컨텍스트를 바탕으로 질문에 답해주세요:
+        📚 대화 컨텍스트 기반 맞춤형 응답 가이드라인:
 
-        **사용자가 학과 관련 질문을 하면, 아래 규칙을 따릅니다.**
+        1. **대화 전체 맥락 고려**: 이전 대화 내용을 철저히 분석하고 연결합니다.
+        2. **일관성 유지**: 이전 답변과 모순되지 않도록 주의합니다.
+        3. 답변은 최대 4문장, 간결하고 명확하게 작성합니다.
+        4. 중요 내용은 핵심만 요약해서 전달합니다.
+        5. **상황별 대응**:
+           - 반복 질문: 새로운 관점 또는 추가 정보 제공
+           - 모호한 질문: 구체적 맥락 확인 후 답변
+           - 연속 질문: 이전 대화 흐름 자연스럽게 이어가기
 
-        1. 응답은 최대 5문장 이내로 작성합니다.
-        2. 명확한 답변이 어려울 경우 **"잘 모르겠습니다."**라고 답변합니다.
-        3. 공손하고 이해하기 쉬운 표현을 사용합니다.
-        4. 질문에 **'디지털경영전공'이라는 단어가 없더라도**, 관련 정보를 PDF에서 찾아 답변합니다.
-        5. 사용자의 질문 의도를 정확히 파악하여, **가장 관련성이 높은 정보**를 제공합니다.
-        6. 학생이 추가 질문을 할 수 있도록 부드러운 마무리 문장을 사용합니다.
-        7. 내용을 사용자 친화적으로 정리해 줍니다.
-        8. 한국어 외의 언어로 질문이 들어오면 해당 언어로 답변합니다.
+        대화 이력: {history}
+        PDF 컨텍스트: {context}
+        현재 질문: {question}
 
-        컨텍스트: {context}
-
-        질문: {question}
-
-        응답:
+        응답 작성:
         """
+        prompt = PromptTemplate.from_template(template)
+        
+        # Claude 3.5 Haiku 모델 사용
+        model = ChatAnthropic(
+            model="claude-3-5-haiku-20240307", 
+            anthropic_api_key=self.api_key,
+            temperature=0.1,
+            max_tokens=1000
+        )
+        return prompt | model | StrOutputParser()
 
-        custom_rag_prompt = PromptTemplate.from_template(template)
-        model = ChatAnthropic(model="claude-3-opus-20240229", anthropic_api_key=self.api_key)
-
-        return custom_rag_prompt | model | StrOutputParser()
-
-    @st.cache_resource
-    def get_vector_db(_self, index_name):
-        try:
-            embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=st.secrets["openai"]["API_KEY"])
-            return FAISS.load_local(index_name, embeddings, allow_dangerous_deserialization=True)
-        except Exception as e:
-            st.error(f"벡터 DB 로드 중 오류 발생: {e}")
-            return None
-
-    def process_question(self, user_question: str) -> Tuple[str, List[Document]]:
-        vector_db = self.get_vector_db(self.index_name)
-        if not vector_db:
-            return "시스템 오류가 발생했습니다. PDF 파일을 다시 업로드해주세요.", []
-
+    def process_question(self, question: str) -> str:
+        # 벡터 데이터베이스에서 관련 문서 검색 (OpenAI 임베딩 그대로 사용)
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=os.environ.get("OPENAI_API_KEY"))
+        vector_db = FAISS.load_local("faiss_index_internal", embeddings, allow_dangerous_deserialization=True)
         retriever = vector_db.as_retriever(search_kwargs={"k": 10})
-        retrieve_docs = retriever.invoke(user_question)
+        docs = retriever.invoke(question)
+        
+        # 대화 기록 요약 가져오기
+        conversation_history = self.memory.chat_memory.messages
 
+        # RAG 체인 생성
         chain = self.get_rag_chain()
 
-        try:
-            response = chain.invoke({"question": user_question, "context": retrieve_docs})
-            return response, retrieve_docs
-        except Exception as e:
-            st.error(f"응답 생성 중 오류 발생: {e}")
-            return "질문 처리 중 오류가 발생했습니다.", []
+        # 대화 기록과 문서 컨텍스트를 포함하여 답변 생성
+        answer = chain.invoke({
+            "question": question, 
+            "context": docs, 
+            "history": conversation_history
+        })
 
-# UI 클래스
-class ChatbotUI:
-    @staticmethod
-    def save_feedback(questions: List[Dict], feedbacks: List[Dict]) -> bool:
-        if not questions and not feedbacks:
-            st.warning("저장할 질문 또는 피드백 데이터가 없습니다.")
-            return False
+        # 대화 체인에 대화 추가
+        self.conversation_chain.predict(input=question)
 
-        try:
-            formatted_questions = [q["질문"] if isinstance(q, dict) else q for q in questions]
-            formatted_feedbacks = [f["피드백"] if isinstance(f, dict) else f for f in feedbacks]
+        return answer
 
-            max_length = max(len(formatted_questions), len(formatted_feedbacks))
-            formatted_questions.extend([""] * (max_length - len(formatted_questions)))
-            formatted_feedbacks.extend([""] * (max_length - len(formatted_feedbacks)))
-
-            with open("questions_and_feedback.csv", mode="w", encoding="utf-8-sig", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow(["질문", "피드백"])
-                for q, f in zip(formatted_questions, formatted_feedbacks):
-                    writer.writerow([q, f])
-            return True
-
-        except Exception as e:
-            st.error(f"피드백 저장 중 오류 발생: {e}")
-            return False
-
+# 메인 함수
 def main():
-    st.set_page_config(initial_sidebar_state="expanded", layout="wide", page_icon="🤖", page_title="디지털경영전공 챗봇")
+    st.set_page_config(page_title="디지털경영전공 챗봇", layout="wide")
+
+    st.title("🎓 디지털경영전공 챗봇")
+    st.caption("여러분의 학과 관련 궁금증을 빠르게 해결해드립니다!")
+
+    if st.button("📥 채팅 시작 !"):
+        generate_faiss_index()
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "user_questions" not in st.session_state:
-        st.session_state.user_questions = []
-    if "user_feedback" not in st.session_state:
-        st.session_state.user_feedback = []
-    if "pdf_processed" not in st.session_state:
-        st.session_state.pdf_processed = False
-    if "index_name" not in st.session_state:
-        st.session_state.index_name = f"faiss_index_{uuid.uuid4().hex[:8]}"
 
-    st.header("디지털경영전공 챗봇")
+    left_col, mid_col, right_col = st.columns([1, 2.5, 1.2])
 
-    left_column, mid_column, right_column = st.columns([1, 2, 1])
+    with left_col:
+        st.subheader("📚 사용 가이드")
+        st.markdown("""
+        - 채팅 시작! 버튼을 눌러주세요.<br>
+        - 궁금한 점에 대해서 물어보세요 !.<br>
+        - 추가 문의는 디지털경영전공 홈페이지나 학과 사무실(044-860-1560)로 문의해 주세요.
+        """, unsafe_allow_html=True)
 
-    with left_column:
-        st.subheader("PDF 업로드")
-        uploaded_files = st.file_uploader("PDF 파일을 업로드해주세요 (여러 파일 가능)", type=["pdf"], accept_multiple_files=True)
+    with mid_col:
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.markdown(f"""
+                <div style='background-color: #731034; padding: 10px; border-radius: 20px; margin-bottom: 10px; color: white; max-width: 70%; box-shadow: 0px 2px 5px rgba(0,0,0,0.1);'>
+                💬 <b>질문:</b> {msg["content"]}
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style='background-color: #f8f8f8; padding: 10px; border-radius: 20px; margin-bottom: 10px; margin-left: auto; box-shadow: 0px 2px 5px rgba(0,0,0,0.1); max-width: 70%;'>
+                🤖 <b>답변:</b> {msg["content"]}
+                </div>""", unsafe_allow_html=True)
 
-        if st.button("업로드한 PDF 처리하기", disabled=not uploaded_files):
-            with st.spinner("PDF 파일 처리 중..."):
-                success = PDFProcessor.process_uploaded_files(uploaded_files)
-                if success:
-                    st.session_state.pdf_processed = True
-                    st.success("모든 PDF 파일 처리가 완료되었습니다!")
-                else:
-                    st.session_state.pdf_processed = False
-                    st.error("PDF 파일 처리 중 오류가 발생했습니다.")
-
-    with mid_column:
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-        prompt = st.chat_input("PDF 내용에 대해 궁금한 점을 질문해 주세요.")
+        prompt = st.chat_input("궁금한 점을 입력해 주세요.")
 
         if prompt:
-            with st.chat_message("user"):
-                st.markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
+            rag = RAGSystem(api_key)
 
-            if not st.session_state.pdf_processed:
-                with st.chat_message("assistant"):
-                    assistant_response = "먼저 왼쪽에서 PDF 파일을 업로드하고 처리해주세요."
-                    st.markdown(assistant_response)
-                    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
+            previous_qa = None
+            if len(st.session_state.messages) >= 2:
+                prev_question = st.session_state.messages[-2]["content"]
+                prev_answer = st.session_state.messages[-1]["content"]
+                previous_qa = (prev_question, prev_answer)
+
+            with st.spinner("질문을 이해하는 중입니다. 잠시만 기다려주세요 😊"):
+                answer = rag.process_question(prompt, previous_qa)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.rerun()
+
+    with right_col:
+        st.subheader("📢 개발자에게 의견 보내기")
+        feedback_input = st.text_area("챗봇에 대한 개선 의견이나 하고 싶은 말을 남겨주세요!")
+        if st.button("피드백 제출"):
+            if feedback_input.strip() != "":
+                with open("feedback_log.csv", mode="a", encoding="utf-8-sig", newline="") as file:
+                    writer = csv.writer(file)
+                    writer.writerow([time.strftime('%Y-%m-%d %H:%M:%S'), feedback_input])
+                st.success("소중한 의견 감사합니다!")
+                st.rerun()
             else:
-                rag_system = RAGSystem(anthropic_api_key, st.session_state.index_name)
+                st.warning("피드백 내용을 입력해 주세요.")
 
-                with st.spinner("질문에 대한 답변을 생성 중입니다..."):
-                    try:
-                        response, context = rag_system.process_question(prompt)
-                        with st.chat_message("assistant"):
-                            st.markdown(response)
-                            if context:
-                                with st.expander("관련 문서 보기"):
-                                    for idx, document in enumerate(context, 1):
-                                        st.subheader(f"관련 문서 {idx}")
-                                        st.write(document.page_content)
-                                        if document.metadata and 'file_path' in document.metadata:
-                                            file_name = os.path.basename(document.metadata['file_path'])
-                                            st.caption(f"출처: {file_name}")
-
-                        st.session_state.messages.append({"role": "assistant", "content": response})
-                    except Exception as e:
-                        st.error(f"질문 처리 중 오류 발생: {str(e)}")
-
-    with right_column:
-        st.subheader("추가 질문 및 피드백")
-        user_question = st.text_input("추가 질문을 남겨주세요!", placeholder="과목 변경 or 행사 문의")
-
-        if st.button("질문 제출"):
-            if user_question:
-                st.session_state.user_questions.append({"질문": user_question})
-                st.success("질문이 제출되었습니다.")
-                st.experimental_rerun()
-            else:
-                st.warning("질문을 입력해주세요.")
-
-        feedback = st.radio("응답이 만족스러우셨나요?", ("만족", "불만족"))
-
-        if feedback == "불만족":
-            reason = st.text_area("불만족 사유를 알려주세요.")
-            if st.button("피드백 제출"):
-                if reason:
-                    st.session_state.user_feedback.append({"피드백": reason})
-                    st.success("피드백이 제출되었습니다.")
-                    st.experimental_rerun()
-                else:
-                    st.warning("사유를 입력해주세요.")
-
-        ui = ChatbotUI()
-        if st.button("질문 및 피드백 CSV로 저장"):
-            if ui.save_feedback(st.session_state.user_questions, st.session_state.user_feedback):
-                st.success("저장 완료!")
-                st.session_state.user_questions = []
-                st.session_state.user_feedback = []
-                st.experimental_rerun()
+        st.subheader("📝 최근 질문 히스토리")
+        for i, q in enumerate([m["content"] for m in st.session_state.messages if m["role"] == "user"][-5:], 1):
+            st.markdown(f"{i}. {q}")
 
 if __name__ == "__main__":
     main()
