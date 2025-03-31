@@ -1,9 +1,10 @@
 streamlit
 langchain
-langchain-openai
-langchain-community
+langchain-core
 langchain-anthropic
-PyMuPDF
+langchain-community
+langchain-openai
 faiss-cpu
-python-dotenv
+openai
+pymupdf
 
