@@ -16,19 +16,61 @@ import csv
 import time
 import uuid
 
-# Anthropic API 키 로드 (Streamlit secrets 사용)
+# API 키 로드
 time.sleep(1)
 api_key = st.secrets["anthropic"]["API_KEY"]
 
-# PDF 인덱스 생성 스크립트와 다른 클래스들은 기존 코드 그대로 유지
+# PDF 처리 클래스 정의
+class PDFProcessor:
+    #PDF를 문서 list로 변환
+    @staticmethod
+    def pdf_to_documents(pdf_path: str) -> List[Document]:
+        loader = PyMuPDFLoader(pdf_path)
+        documents = loader.load()
+        for d in documents:
+            d.metadata['file_path'] = pdf_path
+        return documents
+    #chunking!
+    @staticmethod
+    def chunk_documents(documents: List[Document]) -> List[Document]:
+        splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+        return splitter.split_documents(documents)
 
+# PDF 인덱스 생성 함수
+def generate_faiss_index():
+    pdf_dir = "data/"
+    all_documents = []
+    
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir)
+        st.warning("data/ 폴더가 생성되었습니다. PDF 파일을 여기에 넣고 다시 실행해주세요.")
+        return
+
+    pdf_files = [file for file in os.listdir(pdf_dir) if file.endswith(".pdf")]
+    if not pdf_files:
+        st.error("data/ 폴더에 PDF 파일이 없습니다. PDF를 추가한 후 다시 실행해주세요.")
+        return
+
+    #PDF 파일 문서화
+    for file_name in pdf_files:
+        docs = PDFProcessor.pdf_to_documents(os.path.join(pdf_dir, file_name))
+        all_documents.extend(docs)
+
+    #문서 chunking, vector embedding 생성, 인덱싱
+    chunks = PDFProcessor.chunk_documents(all_documents)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
+    vector_store = FAISS.from_documents(chunks, embeddings)
+    vector_store.save_local("faiss_index_internal")
+    st.success(f"{len(pdf_files)}개의 PDF 파일로 인덱스 생성이 완료되었습니다.")
+
+#RAG
 class RAGSystem:
     def __init__(self, api_key: str):
         self.api_key = api_key
         
-        # Claude 3.5 Haiku 모델로 변경
+        # Claude 3.7 Sonnet 모델로 변경
         self.llm = ChatAnthropic(
-            model="claude-3-5-haiku-20240307", 
+            model="claude-3-7-sonnet-20250219", 
             anthropic_api_key=self.api_key,
             temperature=0.1,  # 일관된 응답을 위해 낮은 온도 설정
             max_tokens=1000
@@ -46,14 +88,20 @@ class RAGSystem:
         template = """
         📚 대화 컨텍스트 기반 맞춤형 응답 가이드라인:
 
-        1. **대화 전체 맥락 고려**: 이전 대화 내용을 철저히 분석하고 연결합니다.
-        2. **일관성 유지**: 이전 답변과 모순되지 않도록 주의합니다.
-        3. 답변은 최대 4문장, 간결하고 명확하게 작성합니다.
-        4. 중요 내용은 핵심만 요약해서 전달합니다.
-        5. **상황별 대응**:
-           - 반복 질문: 새로운 관점 또는 추가 정보 제공
-           - 모호한 질문: 구체적 맥락 확인 후 답변
-           - 연속 질문: 이전 대화 흐름 자연스럽게 이어가기
+        1. 답변은 최대 4문장 이내로 간결하고 명확하게 작성합니다.
+        2. 중요한 내용은 핵심만 요약해서 전달합니다.
+        3. 답변이 어려우면 "잘 모르겠습니다."라고 정중히 답변합니다.
+        4. 질문에 '디지털경영전공' 단어가 없어도 관련 정보를 PDF에서 찾아서 답변합니다.
+        5. 이해하기 쉬운 짧은 문장과 불릿 포인트로 정리합니다.
+        6. 마지막에 "추가로 궁금하신 점이 있다면 언제든지 말씀해주세요."라고 안내합니다.
+        7. 한국어 외 언어로 질문 시 해당 언어로 번역하여 답변합니다.
+        8. 관련된 참고 사항이 있다면 간단히 덧붙입니다.
+        9. 챗봇 어투는 항상 친절하고 단정하게 유지합니다.
+        10. 핵심 내용은 **굵게** 표시해 강조합니다.
+        11. 복잡한 정보는 **불릿 포인트**로 요약 정리합니다.
+        12. 전공 과목 안내 시에는 전체 리스트를 구체적으로 나열합니다.
+        13. 추가 안내는 "추가로 궁금한 점이 있다면 언제든지 말씀해주세요."로 마무리합니다.
+        14. 같은 말을 반복하지 마세요
 
         대화 이력: {history}
         PDF 컨텍스트: {context}
@@ -63,9 +111,9 @@ class RAGSystem:
         """
         prompt = PromptTemplate.from_template(template)
         
-        # Claude 3.5 Haiku 모델 사용
+        # Claude 3.7 Sonnet 모델 사용
         model = ChatAnthropic(
-            model="claude-3-5-haiku-20240307", 
+            model="claude-3-7-sonnet-20250219", 
             anthropic_api_key=self.api_key,
             temperature=0.1,
             max_tokens=1000
