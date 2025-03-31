@@ -24,7 +24,6 @@ openai_api_key = st.secrets["openai"]["API_KEY"]
 
 # PDF 처리 클래스 정의
 class PDFProcessor:
-    #PDF를 문서 list로 변환
     @staticmethod
     def pdf_to_documents(pdf_path: str) -> List[Document]:
         loader = PyMuPDFLoader(pdf_path)
@@ -32,14 +31,14 @@ class PDFProcessor:
         for d in documents:
             d.metadata['file_path'] = pdf_path
         return documents
-    #chunking!
+
     @staticmethod
     def chunk_documents(documents: List[Document]) -> List[Document]:
         splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
         return splitter.split_documents(documents)
 
 # PDF 인덱스 생성 함수
-def generate_faiss_index():
+def generate_faiss_index(api_key: str):
     pdf_dir = "data/"
     all_documents = []
     
@@ -53,32 +52,28 @@ def generate_faiss_index():
         st.error("data/ 폴더에 PDF 파일이 없습니다. PDF를 추가한 후 다시 실행해주세요.")
         return
 
-    #PDF 파일 문서화
     for file_name in pdf_files:
         docs = PDFProcessor.pdf_to_documents(os.path.join(pdf_dir, file_name))
         all_documents.extend(docs)
 
-    #문서 chunking, vector embedding 생성, 인덱싱
     chunks = PDFProcessor.chunk_documents(all_documents)
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
     vector_store = FAISS.from_documents(chunks, embeddings)
     vector_store.save_local("faiss_index_internal")
     st.success(f"{len(pdf_files)}개의 PDF 파일로 인덱스 생성이 완료되었습니다.")
 
-#RAG
+# RAG 시스템 클래스
 class RAGSystem:
     def __init__(self, api_key: str):
         self.api_key = api_key
         
-        # Claude 3.7 Sonnet 모델로 변경
         self.llm = ChatAnthropic(
             model="claude-3-7-sonnet-20250219", 
             anthropic_api_key=self.api_key,
-            temperature=0.1,  # 일관된 응답을 위해 낮은 온도 설정
+            temperature=0.1,
             max_tokens=1000
         )
         
-        # 대화 기억 모듈 초기화
         self.memory = ConversationSummaryMemory(llm=self.llm)
         self.conversation_chain = ConversationChain(
             llm=self.llm, 
@@ -112,8 +107,7 @@ class RAGSystem:
         응답 작성:
         """
         prompt = PromptTemplate.from_template(template)
-        
-        # Claude 3.7 Sonnet 모델 사용
+
         model = ChatAnthropic(
             model="claude-3-7-sonnet-20250219", 
             anthropic_api_key=self.api_key,
@@ -123,26 +117,20 @@ class RAGSystem:
         return prompt | model | StrOutputParser()
 
     def process_question(self, question: str) -> str:
-        # 벡터 데이터베이스에서 관련 문서 검색 (OpenAI 임베딩 그대로 사용)
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=os.environ.get("OPENAI_API_KEY"))
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=self.api_key)
         vector_db = FAISS.load_local("faiss_index_internal", embeddings, allow_dangerous_deserialization=True)
         retriever = vector_db.as_retriever(search_kwargs={"k": 10})
         docs = retriever.invoke(question)
-        
-        # 대화 기록 요약 가져오기
-        conversation_history = self.memory.chat_memory.messages
 
-        # RAG 체인 생성
+        conversation_history = self.memory.chat_memory.messages
         chain = self.get_rag_chain()
 
-        # 대화 기록과 문서 컨텍스트를 포함하여 답변 생성
         answer = chain.invoke({
             "question": question, 
             "context": docs, 
             "history": conversation_history
         })
 
-        # 대화 체인에 대화 추가
         self.conversation_chain.predict(input=question)
 
         return answer
@@ -150,12 +138,11 @@ class RAGSystem:
 # 메인 함수
 def main():
     st.set_page_config(page_title="디지털경영전공 챗봇", layout="wide")
-
     st.title("🎓 디지털경영전공 챗봇")
     st.caption("여러분의 학과 관련 궁금증을 빠르게 해결해드립니다!")
 
     if st.button("📥 채팅 시작 !"):
-        generate_faiss_index()
+        generate_faiss_index(openai_api_key)
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -187,16 +174,10 @@ def main():
 
         if prompt:
             st.session_state.messages.append({"role": "user", "content": prompt})
-            rag = RAGSystem(api_key)
-
-            previous_qa = None
-            if len(st.session_state.messages) >= 2:
-                prev_question = st.session_state.messages[-2]["content"]
-                prev_answer = st.session_state.messages[-1]["content"]
-                previous_qa = (prev_question, prev_answer)
+            rag = RAGSystem(api_key=openai_api_key)
 
             with st.spinner("질문을 이해하는 중입니다. 잠시만 기다려주세요 😊"):
-                answer = rag.process_question(prompt, previous_qa)
+                answer = rag.process_question(prompt)
             st.session_state.messages.append({"role": "assistant", "content": answer})
             st.rerun()
 
