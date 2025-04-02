@@ -174,7 +174,7 @@ def main():
 
         if prompt:
             st.session_state.messages.append({"role": "user", "content": prompt})
-            rag = RAGSystem(api_key=anthropic_api_key)
+            rag = RAGSystem(api_key=anthropic_api_key,openai)
 
             with st.spinner("질문을 이해하는 중입니다. 잠시만 기다려주세요 😊"):
                 answer = rag.process_question(prompt)
