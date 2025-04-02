@@ -68,7 +68,7 @@ class RAGSystem:
         self.api_key = api_key
         
         self.llm = ChatAnthropic(
-            model="claude-3-7-sonnet-20250219", 
+            model="claude-3-5-haiku-20241022", 
             anthropic_api_key=self.api_key,
             temperature=0.1,
             max_tokens=1000
