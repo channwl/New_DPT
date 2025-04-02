@@ -73,6 +73,13 @@ class RAGSystem:
             temperature=0.1,
             max_tokens=1000
         )
+
+        self.llm = ChatOpenAI(
+            model="gpt-4o",
+            openai_api_key=self.api_key,  # OpenAI API 키
+            temperature=0.1,
+            max_tokens=1000
+)
         
         self.memory = ConversationSummaryMemory(llm=self.llm)
         self.conversation_chain = ConversationChain(
