@@ -118,7 +118,7 @@ class RAGSystem:
         prompt = PromptTemplate.from_template(template)
 
         model = ChatAnthropic(
-            model="claude-3-sonnet-20240229",
+            model="claude-3-haiku-20240307",
             anthropic_api_key=self.anthropic_api_key,
             temperature=0.1,
             max_tokens=1000
