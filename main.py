@@ -1,6 +1,6 @@
 import streamlit as st
 from langchain_anthropic import ChatAnthropic
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.documents.base import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -21,7 +21,6 @@ time.sleep(1)
 anthropic_api_key = st.secrets["anthropic"]["API_KEY"]
 openai_api_key = st.secrets["openai"]["API_KEY"]
 
-
 # PDF 처리 클래스 정의
 class PDFProcessor:
     @staticmethod
@@ -41,7 +40,7 @@ class PDFProcessor:
 def generate_faiss_index(api_key: str):
     pdf_dir = "data/"
     all_documents = []
-    
+
     if not os.path.exists(pdf_dir):
         os.makedirs(pdf_dir)
         st.warning("data/ 폴더가 생성되었습니다. PDF 파일을 여기에 넣고 다시 실행해주세요.")
@@ -64,27 +63,30 @@ def generate_faiss_index(api_key: str):
 
 # RAG 시스템 클래스
 class RAGSystem:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        
-        self.llm = ChatAnthropic(
-            model="claude-3-opus-20240229", 
-            anthropic_api_key=self.api_key,
-            temperature=0.1,
-            max_tokens=1000
-        )
+    def __init__(self, anthropic_api_key: str, openai_api_key: str, provider: str = "openai"):
+        self.anthropic_api_key = anthropic_api_key
+        self.openai_api_key = openai_api_key
+        self.provider = provider
 
-        self.llm = ChatOpenAI(
-            model="gpt-4o",
-            openai_api_key=self.api_key,  # OpenAI API 키
-            temperature=0.1,
-            max_tokens=1000
-)
-        
+        if provider == "anthropic":
+            self.llm = ChatAnthropic(
+                model="claude-3-opus-20240229",
+                anthropic_api_key=self.anthropic_api_key,
+                temperature=0.1,
+                max_tokens=1000
+            )
+        else:
+            self.llm = ChatOpenAI(
+                model="gpt-4o",
+                openai_api_key=self.openai_api_key,
+                temperature=0.1,
+                max_tokens=1000
+            )
+
         self.memory = ConversationSummaryMemory(llm=self.llm)
         self.conversation_chain = ConversationChain(
-            llm=self.llm, 
-            memory=self.memory, 
+            llm=self.llm,
+            memory=self.memory,
             verbose=True
         )
 
@@ -116,15 +118,16 @@ class RAGSystem:
         prompt = PromptTemplate.from_template(template)
 
         model = ChatAnthropic(
-            model="claude-3-7-sonnet-20250219", 
-            anthropic_api_key=self.api_key,
+            model="claude-3-sonnet-20240229",
+            anthropic_api_key=self.anthropic_api_key,
             temperature=0.1,
             max_tokens=1000
         )
+
         return prompt | model | StrOutputParser()
 
     def process_question(self, question: str) -> str:
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=self.api_key)
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=self.openai_api_key)
         vector_db = FAISS.load_local("faiss_index_internal", embeddings, allow_dangerous_deserialization=True)
         retriever = vector_db.as_retriever(search_kwargs={"k": 10})
         docs = retriever.invoke(question)
@@ -133,8 +136,8 @@ class RAGSystem:
         chain = self.get_rag_chain()
 
         answer = chain.invoke({
-            "question": question, 
-            "context": docs, 
+            "question": question,
+            "context": docs,
             "history": conversation_history
         })
 
@@ -181,7 +184,11 @@ def main():
 
         if prompt:
             st.session_state.messages.append({"role": "user", "content": prompt})
-            rag = RAGSystem(anthropic_api_key=anthropic_api_key, openai_api_key=openai_api_key)
+            rag = RAGSystem(
+                anthropic_api_key=anthropic_api_key,
+                openai_api_key=openai_api_key,
+                provider="openai"  # 또는 "anthropic" 으로 변경 가능
+            )
 
             with st.spinner("질문을 이해하는 중입니다. 잠시만 기다려주세요 😊"):
                 answer = rag.process_question(prompt)
